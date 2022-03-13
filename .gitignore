@@ -4,3 +4,7 @@ working
 *.egg-info
 *.pyc
 __pycache__
+hsbc/
+samplecode.py
+launch.json
+

@@ -230,7 +230,7 @@ class TableZoneFcy(TableZone):
                     new_balance = previous_balance
 
 
-            if row[1] != "": dt = self.extract_date(row[1])
+            if ((row[1] != "") and (row[0] != "Total")): dt = self.extract_date(row[1])
             desc = (desc + " " if desc != "" else "") + row[2]
             credit = row[3]
             debit = row[4]
@@ -296,6 +296,8 @@ class TableZoneSum(TableZone):
                 if row[0] == 'Total':
                     self.summary['total_balance_hkd'] = self.extract_amount(row[6], row[7])
                     continue
+                elif ('Card' in row[0]):
+                    break
                 elif row[0] not in TableZoneSum.map_type.keys():
                     raise TemplateException("Summary contains an unknow Account type [{}]".format(row[0]))
                 else:
