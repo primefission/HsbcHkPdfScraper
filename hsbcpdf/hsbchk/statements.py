@@ -10,6 +10,12 @@ import pandas as pd
 from pdfquery.cache import FileCache
 import pdfquery
 import pdfminer
+
+from pdfminer.pdfparser import PDFParser
+from pdfminer.pdfdocument import PDFDocument
+from pdfminer.pdfpage import PDFPage
+from pdfminer.pdfinterp import resolve1
+
 import camelot
 import numpy as np
 import re
@@ -161,7 +167,7 @@ class Card(HsbcStatement):
     ph_st_currency = TextBox(page=1, bbox="477,600,566,616")
     page1_tabbox = "60,617,570,339"
     pagex_tabbox = "60,666,570,77"
-    columns = "97, 135, 477"
+    columns = "97, 135, 260, 477"
 
     def _extract_amount(self, samount):
         res = - float(samount.replace(",","").replace("CR",""))
@@ -195,52 +201,72 @@ class Card(HsbcStatement):
         self.logger.info("process card statement of {} on {}".format(self.account_number, self.st_date))
 
     def extract_tables(self):
+        file = open(self.pdfpath, 'rb')
+        parser = PDFParser(file)
+        document = PDFDocument(parser)
+        
+
+        # This will give you the count of pages
+        p_num = resolve1(document.catalog['Pages'])['Count']
+        file.close()
+        p_last = camelot.read_pdf(
+            self.pdfpath,
+            pages=str(p_num),
+            flavor="stream",
+            table_areas=["60,566,570,540"]
+        )[0]
+        #check if this last page is the spending summary
+        if ( (p_last.df.apply(lambda row: row.astype(str).str.contains('Number of transactions').any(), axis=1).any()) &
+            (p_last.df.apply(lambda row: row.astype(str).str.contains('Category').any(), axis=1).any()) ):
+            delete_last = True
         tp = camelot.read_pdf(
             self.pdfpath,
             pages="1",
             flavor="stream",
             table_areas=[self.page1_tabbox],
-            columns=[self.columns]
+            columns=[self.columns],
+            split_text=True
         )[0].df[1:]
         others = camelot.read_pdf(
             self.pdfpath,
             pages="2-end",
             flavor="stream",
             table_areas=[self.pagex_tabbox],
-            columns=[self.columns]
+            columns=[self.columns],
+            split_text=True
         )
-        for i in others:
+        for idx, i in enumerate(others):
             #Filter out the annual spending summary table
-            if ((i.df.apply(lambda row: row.astype(str).str.contains('spending summary').any(), axis=1).any()) & 
-                (i.df.apply(lambda row: row.astype(str).str.contains('Category').any(), axis=1).any())):
+            if ((idx == others.n-1) and (delete_last)):
                 continue
             tp = pd.concat([tp, i.df[1:]])
         self.logger.debug(f'full table: {tp.to_string()}')
         tp = tp.apply(lambda x: x.str.strip())
-        tp = pd.concat([tp, tp.iloc[:, [0, 2, 3]].shift(-1)], axis=1)[(tp[3] != "") & (tp[3].str.contains(r'\d'))]
-        tp.columns = ['post_date', 'transaction_date', 'desc', 'amount', 'nextpostD', 'nextdesc', 'nextamount']
+        tp = pd.concat([tp, tp.iloc[:, [0, 2, 3, 4]].shift(-1)], axis=1)[(tp[4] != "") & (tp[4].str.contains(r'\d'))]
+        tp.columns = ['post_date', 'transaction_date', 'desc', 'memo', 'amount', 'nextpostD', 'nextdesc', 'nextmemo', 'nextamount']
         tp.iloc[-1]['nextdesc'] = ""
-        tp['description'] = tp.apply(
-            lambda row: " ".join([row.desc, row.nextdesc]) if row.post_date != "" and row.nextpostD == "" and row.nextamount == "" else row.desc,
+        tp.iloc[-1]['nextmemo'] = ""
+        tp['memo'] = tp.apply(
+            lambda row: " ".join([row.memo, row.nextdesc, row.nextmemo]) if row.post_date != "" and row.nextpostD == "" and row.nextamount == "" else row.memo,
             #concat_desc,
             axis=1
         )
         self.logger.debug(f'full concat table columns: {tp.columns}')
-        self.logger.debug("full concat table: {}".format(tp[['post_date', 'desc', 'description', 'amount', 'nextpostD', 'nextdesc', 'nextamount']].to_string()))
+        self.logger.debug("full concat table: {}".format(tp[['post_date', 'desc', 'memo', 'amount', 'nextpostD', 'nextdesc', 'nextmemo', 'nextamount']].to_string()))
 
         # First row must contains previous balance
-        if tp.iloc[0]['description'] not in (self.OPENING_BAL, self.PREVIOUS_BAL):
+        if tp.iloc[0]['desc'] not in (self.OPENING_BAL, self.PREVIOUS_BAL):
             raise TemplateException(
-                "First line of table should be '{}' instead of {}".format(self.PREVIOUS_BAL, tp.iloc[0]['description']))
+                "First line of table should be '{}' instead of {}".format(self.PREVIOUS_BAL, tp.iloc[0]['desc']))
         self.old_balance = self._extract_amount(tp.iloc[0]['amount'])
 
         # Last Row should contain statement balance
-        if tp.iloc[-1]['description'] not in (self.CLOSING_BAL, self.STMT_BAL):
+        if tp.iloc[-1]['desc'] not in (self.CLOSING_BAL, self.STMT_BAL):
             raise TemplateException(
-                "Last line of table should be '{}' instead of {}".format(self.STMT_BAL, tp.iloc[-1]['description']))
+                "Last line of table should be '{}' instead of {}".format(self.STMT_BAL, tp.iloc[-1]['desc']))
         self.new_balance = self._extract_amount(tp.iloc[-1]['amount'])
 
-        self.entries = tp[['post_date', 'transaction_date', 'description', 'amount']][1:-1]
+        self.entries = tp[['post_date', 'transaction_date', 'desc', 'memo', 'amount']][1:-1]
         self.entries['post_date'] = self.entries['post_date'].apply(self._extract_date)
         self.entries['transaction_date'] = self.entries['transaction_date'].apply(self._extract_date)
         self.entries['amount'] = self.entries['amount'].apply(self._extract_amount)
